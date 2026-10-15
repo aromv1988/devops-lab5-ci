@@ -1,45 +1,55 @@
-name: Node.js CI Pipeline
+name: Node.js CI/CD Pipeline
 
 on:
   push:
     branches:
       - main
-  pull_request:
-    branches:
-      - main
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # Крок 1: Завантаження коду репозиторію в CI-середовище
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Крок 2: Установлення та налаштування Node.js
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20' # або версія, що використовується у проєкті
+          node-version: '20'
 
-      # Крок 3: Встановлення залежностей проєкту
       - name: Install dependencies
         run: npm install
 
-      # Крок 4: Запуск білд-процесу та перевірка на помилки
       - name: Run build process
         run: npm run build
 
-      # Крок 5: Збереження результату білду (артефакту)
-      # Додає можливість завантажити зібрані файли у вкладці Actions
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-artifact
-          path: |
-            dist/
-            build/
-            index.js
-            package.json
-          if-no-files-found: warn
+      - name: Decode SSH key
+        run: |
+          echo "${{ secrets.EC2_SSH_KEY_B64 }}" | base64 -d > ec2-key.pem
+          chmod 600 ec2-key.pem
+
+      - name: Deploy files to EC2
+        run: |
+          rsync -avz -e "ssh -i ec2-key.pem -o StrictHostKeyChecking=no" \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude 'node_modules' \
+            ./ ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/home/ubuntu/nodeapp
+
+      - name: Execute remote commands on EC2
+        run: |
+          ssh -i ec2-key.pem -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
+            if ! command -v node &> /dev/null; then
+              curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+              sudo apt-get install -y nodejs
+            fi
+
+            if ! command -v pm2 &> /dev/null; then
+              sudo npm install -g pm2
+            fi
+
+            cd /home/ubuntu/nodeapp
+            npm install
+            pm2 restart all || pm2 start index.js --name "node-app"
+          EOF
